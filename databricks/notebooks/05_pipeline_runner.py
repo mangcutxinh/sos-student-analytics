@@ -1,86 +1,158 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 05 – Pipeline Runner
-# MAGIC **Dự án:** Hệ thống SOA Phân tích và Quản lý Kết quả Học tập Sinh viên
+# MAGIC # 05 · Pipeline Runner (Orchestrator)
 # MAGIC
-# MAGIC Notebook điều phối – chạy toàn bộ ETL pipeline theo thứ tự.
-# MAGIC Dùng notebook này để tạo **Databricks Job** (Workflows).
+# MAGIC Runs the full ETL pipeline in sequence. Used as the **entry-point notebook** for a Databricks Job.
 # MAGIC
-# MAGIC | Bước | Notebook | Mô tả |
-# MAGIC |---|---|---|
-# MAGIC | 1 | 01_data_ingestion | Đọc CSV từ DBFS, validate |
-# MAGIC | 2 | 02_bronze_layer   | Lưu raw → Delta Bronze |
-# MAGIC | 3 | 03_silver_layer   | Làm sạch → Delta Silver |
-# MAGIC | 4 | 04_gold_analytics | Tính GPA, phân tích → Delta Gold |
+# MAGIC ```
+# MAGIC 01_data_ingestion  →  02_bronze_layer  →  03_silver_layer  →  04_gold_analytics
+# MAGIC ```
+# MAGIC
+# MAGIC Each notebook is called via `%run` (same cluster) so variables and SparkSession are shared.
 
 # COMMAND ----------
-
 import time
+import json
 from datetime import datetime
+from pyspark.sql import SparkSession
 
-def run_step(step_num, name, path):
-    print(f"\n{'='*50}")
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] STEP {step_num}: {name}")
-    print(f"{'='*50}")
-    start = time.time()
-    dbutils.notebook.run(path, timeout_seconds=600)
-    elapsed = round(time.time() - start, 1)
-    print(f"✅ Step {step_num} hoàn thành trong {elapsed}s")
-    return elapsed
+spark = SparkSession.builder.getOrCreate()
 
 # COMMAND ----------
+# MAGIC %md ## Pipeline Config
 
-print("🚀 BẮT ĐẦU ETL PIPELINE")
-print(f"⏰ Thời gian bắt đầu: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print("=" * 50)
+# COMMAND ----------
+# ── These can be overridden by Databricks Job Parameters ──────────────────────
+dbutils.widgets.text("source_path",  "dbfs:/FileStore/student_score_dataset.csv", "Source CSV Path")
+dbutils.widgets.text("semester",     "2024-1",                                    "Semester")
+dbutils.widgets.text("run_mode",     "full",                                      "Run Mode: full | bronze_only | gold_only")
+dbutils.widgets.text("notify_email", "",                                           "Notification Email")
 
+SOURCE_PATH   = dbutils.widgets.get("source_path")
+SEMESTER      = dbutils.widgets.get("semester")
+RUN_MODE      = dbutils.widgets.get("run_mode")
+NOTIFY_EMAIL  = dbutils.widgets.get("notify_email")
+
+NOTEBOOKS_DIR = "/Repos/<your-username>/soa-student-analytics/databricks/notebooks"
+# ↑ Change <your-username> to your Databricks username after linking the repo
+
+print(f"╔══════════════════════════════════════════════════╗")
+print(f"║   SOA Student Analytics  —  Pipeline Runner      ║")
+print(f"╠══════════════════════════════════════════════════╣")
+print(f"║  source_path : {SOURCE_PATH:<34}║")
+print(f"║  semester    : {SEMESTER:<34}║")
+print(f"║  run_mode    : {RUN_MODE:<34}║")
+print(f"║  started_at  : {datetime.utcnow().isoformat():<34}║")
+print(f"╚══════════════════════════════════════════════════╝")
+
+# COMMAND ----------
+# MAGIC %md ## Stage Execution
+
+# COMMAND ----------
+pipeline_log = []
+
+def run_stage(name: str, notebook_path: str, params: dict = None, timeout: int = 1800):
+    """Run a notebook stage and record result."""
+    params = params or {}
+    start  = time.time()
+    status = "SUCCESS"
+    error  = None
+    try:
+        result = dbutils.notebook.run(
+            notebook_path,
+            timeout_seconds=timeout,
+            arguments=params
+        )
+        print(f"✅  {name}  ({round(time.time()-start, 1)}s)")
+    except Exception as e:
+        status = "FAILED"
+        error  = str(e)
+        print(f"❌  {name}  FAILED  →  {error}")
+        raise
+
+    pipeline_log.append({
+        "stage":      name,
+        "status":     status,
+        "duration_s": round(time.time()-start, 1),
+        "error":      error,
+    })
+
+# COMMAND ----------
 pipeline_start = time.time()
+failed_stages  = []
 
-t1 = run_step(1, "Data Ingestion",  "/soa-student-analytics/01_ingestion/01_data_ingestion")
-t2 = run_step(2, "Bronze Layer",    "/soa-student-analytics/02_bronze/02_bronze_layer")
-t3 = run_step(3, "Silver Layer",    "/soa-student-analytics/03_silver/03_silver_layer")
-t4 = run_step(4, "Gold Analytics",  "/soa-student-analytics/04_gold/04_gold_analytics")
+try:
+    if RUN_MODE in ("full", "ingest_only", "bronze_only"):
+        run_stage(
+            "01_data_ingestion",
+            f"{NOTEBOOKS_DIR}/01_data_ingestion",
+            {"source_path": SOURCE_PATH, "semester": SEMESTER},
+        )
 
-total = round(time.time() - pipeline_start, 1)
+    if RUN_MODE in ("full", "bronze_only"):
+        run_stage(
+            "02_bronze_layer",
+            f"{NOTEBOOKS_DIR}/02_bronze_layer",
+        )
 
-print("\n" + "=" * 50)
-print("🎉 PIPELINE HOÀN THÀNH!")
-print(f"⏱️  Tổng thời gian: {total}s")
-print(f"   Step 1 (Ingestion) : {t1}s")
-print(f"   Step 2 (Bronze)    : {t2}s")
-print(f"   Step 3 (Silver)    : {t3}s")
-print(f"   Step 4 (Gold)      : {t4}s")
-print("=" * 50)
+    if RUN_MODE in ("full", "silver_only"):
+        run_stage(
+            "03_silver_layer",
+            f"{NOTEBOOKS_DIR}/03_silver_layer",
+        )
+
+    if RUN_MODE in ("full", "gold_only"):
+        run_stage(
+            "04_gold_analytics",
+            f"{NOTEBOOKS_DIR}/04_gold_analytics",
+        )
+
+    pipeline_status = "SUCCESS"
+
+except Exception as e:
+    pipeline_status = "FAILED"
+    failed_stages.append(str(e))
 
 # COMMAND ----------
-
-# MAGIC %md ## Kết quả cuối – kiểm tra nhanh Gold tables
-
-# COMMAND ----------
-
-print("📊 Kết quả Gold layer sau pipeline:")
-for path, name in [
-    ("/delta/gold/student_gpa",        "student_gpa"),
-    ("/delta/gold/score_distribution", "score_distribution"),
-    ("/delta/gold/attendance_impact",  "attendance_impact"),
-]:
-    df = spark.read.format("delta").load(path)
-    print(f"  ✅ {name}: {df.count()} rows")
+# MAGIC %md ## Pipeline Summary
 
 # COMMAND ----------
+total_duration = round(time.time() - pipeline_start, 1)
 
-# Quick summary
-from pyspark.sql.functions import count, when, col, avg, round as spark_round
+print("\n╔══════════════════════════════════════════════════════╗")
+print(f"║  PIPELINE {pipeline_status:<42}║")
+print(f"╠══════════════════════════════════════════════════════╣")
+for entry in pipeline_log:
+    icon = "✅" if entry["status"] == "SUCCESS" else "❌"
+    print(f"║  {icon}  {entry['stage']:<28} {entry['duration_s']:>6}s  ║")
+print(f"╠══════════════════════════════════════════════════════╣")
+print(f"║  Total duration : {total_duration:<35}║")
+print(f"╚══════════════════════════════════════════════════════╝")
 
-df_gold = spark.read.format("delta").load("/delta/gold/student_gpa")
+# COMMAND ----------
+# MAGIC %md ## Write Run Log to Delta
 
-total    = df_gold.count()
-pass_ct  = df_gold.filter(col("pass_fail") == "Pass").count()
-risk_ct  = df_gold.filter(col("at_risk") == True).count()
-avg_g    = df_gold.agg(spark_round(avg("grade_10"),2).alias("avg")).collect()[0]["avg"]
+# COMMAND ----------
+from pyspark.sql import Row
 
-print(f"\n📈 TỔNG KẾT HỌC LỰC ({total} sinh viên)")
-print(f"  Đạt (Pass)      : {pass_ct} ({round(pass_ct/total*100,1)}%)")
-print(f"  Không đạt (Fail): {total-pass_ct} ({round((total-pass_ct)/total*100,1)}%)")
-print(f"  Nguy cơ học yếu : {risk_ct} ({round(risk_ct/total*100,1)}%)")
-print(f"  Điểm TB toàn lớp: {avg_g} / 10")
+log_row = Row(
+    run_id          = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().toString(),
+    pipeline_status = pipeline_status,
+    semester        = SEMESTER,
+    source_path     = SOURCE_PATH,
+    run_mode        = RUN_MODE,
+    total_duration  = total_duration,
+    stages          = json.dumps(pipeline_log),
+    run_timestamp   = datetime.utcnow().isoformat(),
+)
+
+log_df = spark.createDataFrame([log_row])
+log_df.write.format("delta").mode("append").save("dbfs:/delta/pipeline_runs")
+print("✅ Run log written to dbfs:/delta/pipeline_runs")
+
+# COMMAND ----------
+if pipeline_status == "FAILED":
+    raise Exception(f"Pipeline failed at stages: {failed_stages}")
+
+print("\n🎉 Pipeline completed successfully!")
+dbutils.notebook.exit(json.dumps({"status": "SUCCESS", "duration_s": total_duration}))

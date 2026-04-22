@@ -1,167 +1,215 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 04 – Gold Layer (Analytics & GPA)
-# MAGIC **Dự án:** Hệ thống SOA Phân tích và Quản lý Kết quả Học tập Sinh viên
+# MAGIC # 04 · Gold Analytics Layer
+# MAGIC **Pipeline:** Silver → Aggregations → ML Features → Delta Gold
 # MAGIC
-# MAGIC Gold layer tạo các bảng phân tích sẵn sàng cho API:
-# MAGIC - **student_gpa**: điểm tổng kết, xếp loại, cờ cảnh báo học yếu
-# MAGIC - **score_distribution**: phân phối điểm theo xếp loại
-# MAGIC - **attendance_impact**: tương quan điểm danh vs điểm số
+# MAGIC Gold tables are consumption-ready:  BI dashboards, API queries, ML models.
 
 # COMMAND ----------
-
-# MAGIC %md ## 1. Đọc Silver
-
-# COMMAND ----------
-
-from pyspark.sql.functions import (
-    col, round as spark_round, when, avg, count,
-    min, max, stddev, corr, sum as spark_sum,
-    current_timestamp
-)
-
-df_silver = spark.read.format("delta").load("/delta/silver/students_clean")
-print(f"📦 Silver input: {df_silver.count()} rows")
-
-# COMMAND ----------
-
-# MAGIC %md ## 2. Bảng Gold 1 – student_gpa (xếp loại từng sinh viên)
-
-# COMMAND ----------
-
-df_gpa = df_silver.withColumn(
-    "letter_grade",
-    when(col("grade_10") >= 8.5, "A - Xuất sắc")
-   .when(col("grade_10") >= 7.0, "B - Giỏi")
-   .when(col("grade_10") >= 5.5, "C - Khá")
-   .when(col("grade_10") >= 4.0, "D - Trung bình")
-   .otherwise("F - Yếu / Không đạt")
-).withColumn(
-    "pass_fail",
-    when(col("grade_10") >= 4.0, "Pass").otherwise("Fail")
-).withColumn(
-    "at_risk",
-    when(
-        (col("grade_10") < 5.0) |
-        (col("lectures_attended") < 3) |
-        (col("labs_attended") < 2),
-        True
-    ).otherwise(False)
-).withColumn(
-    "gpa_trend",
-    when(col("grade_10") > col("previous_gpa"), "↑ Cải thiện")
-   .when(col("grade_10") < col("previous_gpa"), "↓ Giảm sút")
-   .otherwise("→ Ổn định")
-).select(
-    "student_id","name","age","gender",
-    "quiz_total","midterm_pct","final_pct","total_score","grade_10",
-    "previous_gpa","letter_grade","pass_fail","at_risk","gpa_trend",
-    "lectures_attended","labs_attended"
-)
-
-df_gpa.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .option("overwriteSchema","true") \
-    .save("/delta/gold/student_gpa")
-
-print(f"✅ student_gpa saved: {df_gpa.count()} rows")
-display(df_gpa.limit(15))
-
-# COMMAND ----------
-
-# Tóm tắt phân loại
-print("📊 Phân bổ sinh viên theo xếp loại:")
-display(
-    df_gpa.groupBy("letter_grade")
-          .agg(count("*").alias("so_sinh_vien"))
-          .orderBy("letter_grade")
-)
-
-print("\n🚨 Sinh viên có nguy cơ học yếu (at_risk = True):")
-at_risk_count = df_gpa.filter(col("at_risk") == True).count()
-total = df_gpa.count()
-print(f"   {at_risk_count} / {total} sinh viên ({round(at_risk_count/total*100,1)}%)")
-
-# COMMAND ----------
-
-# MAGIC %md ## 3. Bảng Gold 2 – score_distribution (thống kê tổng hợp)
-
-# COMMAND ----------
-
-df_dist = df_gpa.agg(
-    count("*").alias("total_students"),
-    spark_round(avg("grade_10"), 2).alias("avg_grade"),
-    spark_round(min("grade_10"), 2).alias("min_grade"),
-    spark_round(max("grade_10"), 2).alias("max_grade"),
-    spark_round(stddev("grade_10"), 2).alias("stddev_grade"),
-    count(when(col("pass_fail") == "Pass", 1)).alias("pass_count"),
-    count(when(col("pass_fail") == "Fail", 1)).alias("fail_count"),
-    count(when(col("at_risk") == True, 1)).alias("at_risk_count"),
-)
-
-df_dist.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .option("overwriteSchema","true") \
-    .save("/delta/gold/score_distribution")
-
-print("✅ score_distribution saved")
-display(df_dist)
-
-# COMMAND ----------
-
-# MAGIC %md ## 4. Bảng Gold 3 – attendance_impact (tương quan điểm danh vs điểm)
-
-# COMMAND ----------
-
-df_att = df_silver.groupBy("lectures_attended","labs_attended").agg(
-    count("*").alias("student_count"),
-    spark_round(avg("grade_10"), 2).alias("avg_grade"),
-    spark_round(avg("total_score"), 2).alias("avg_total_score"),
-)
-
-df_att.write \
-    .format("delta") \
-    .mode("overwrite") \
-    .option("overwriteSchema","true") \
-    .save("/delta/gold/attendance_impact")
-
-print("✅ attendance_impact saved")
-
-# Hệ số tương quan
-corr_lec = df_silver.stat.corr("lectures_attended", "grade_10")
-corr_lab = df_silver.stat.corr("labs_attended", "grade_10")
-print(f"\n📈 Tương quan lectures_attended ↔ grade_10 : {round(corr_lec,3)}")
-print(f"📈 Tương quan labs_attended    ↔ grade_10 : {round(corr_lab,3)}")
-
-display(df_att.orderBy("avg_grade", ascending=False).limit(20))
-
-# COMMAND ----------
-
-# MAGIC %md ## 5. Xác minh toàn bộ Gold tables
-
-# COMMAND ----------
-
-for path, name in [
-    ("/delta/gold/student_gpa",       "student_gpa"),
-    ("/delta/gold/score_distribution","score_distribution"),
-    ("/delta/gold/attendance_impact", "attendance_impact"),
-]:
-    df_check = spark.read.format("delta").load(path)
-    print(f"✅ {name}: {df_check.count()} rows, {len(df_check.columns)} cols")
-
-# COMMAND ----------
-
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from delta.tables import DeltaTable
-dt_gold = DeltaTable.forPath(spark, "/delta/gold/student_gpa")
-display(dt_gold.history())
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("04_gold_analytics")
+
+spark = SparkSession.builder \
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+    .getOrCreate()
 
 # COMMAND ----------
+SILVER_PATH      = "dbfs:/delta/silver/student_scores"
+GOLD_PATH_GPA    = "dbfs:/delta/gold/student_gpa_summary"
+GOLD_PATH_MAJOR  = "dbfs:/delta/gold/major_analytics"
+GOLD_PATH_SUBJ   = "dbfs:/delta/gold/subject_analytics"
+GOLD_PATH_ML     = "dbfs:/delta/gold/ml_features"
 
-print("🎉 GOLD LAYER HOÀN THÀNH!")
-print("=" * 50)
-print("Các bảng đã tạo:")
-print("  /delta/gold/student_gpa        → xếp loại từng SV")
-print("  /delta/gold/score_distribution → thống kê tổng hợp")
-print("  /delta/gold/attendance_impact  → tương quan điểm danh")
+# COMMAND ----------
+# MAGIC %md ## 1 · Read Silver
+
+# COMMAND ----------
+silver = spark.read.format("delta").load(SILVER_PATH)
+print(f"✅ Silver rows: {silver.count()}")
+
+# COMMAND ----------
+# MAGIC %md ## 2 · Gold Table A — Student GPA Summary
+
+# COMMAND ----------
+# Per-student across all subjects in semester
+student_window = Window.partitionBy("student_id","semester")
+
+gpa_summary = (
+    silver
+    .groupBy("student_id","full_name","major","year_of_study","semester")
+    .agg(
+        F.round(F.avg("gpa_calculated"),    2).alias("avg_gpa"),
+        F.round(F.avg("midterm_score"),     2).alias("avg_midterm"),
+        F.round(F.avg("final_score"),       2).alias("avg_final"),
+        F.round(F.avg("attendance_rate"),   2).alias("avg_attendance"),
+        F.count("subject")                   .alias("subjects_count"),
+        F.sum(F.col("is_improved").cast("int")).alias("subjects_improved"),
+        F.collect_list("grade")              .alias("all_grades"),
+    )
+    .withColumn("overall_grade",
+        F.when(F.col("avg_gpa") >= 8.5, "A")
+        .when(F.col("avg_gpa") >= 7.0,  "B")
+        .when(F.col("avg_gpa") >= 5.5,  "C")
+        .when(F.col("avg_gpa") >= 4.0,  "D")
+        .otherwise("F")
+    )
+    .withColumn("rank_in_semester",
+        F.rank().over(
+            Window.partitionBy("semester").orderBy(F.col("avg_gpa").desc())
+        )
+    )
+    .withColumn("gold_updated_at", F.current_timestamp())
+)
+
+gpa_summary.write.format("delta").mode("overwrite") \
+           .option("overwriteSchema","true").save(GOLD_PATH_GPA)
+print(f"✅ Gold GPA summary → {GOLD_PATH_GPA}  ({gpa_summary.count()} rows)")
+gpa_summary.show(5, truncate=False)
+
+# COMMAND ----------
+# MAGIC %md ## 3 · Gold Table B — Major Analytics
+
+# COMMAND ----------
+major_analytics = (
+    silver
+    .groupBy("major","semester")
+    .agg(
+        F.count("student_id")                .alias("student_count"),
+        F.round(F.avg("gpa_calculated"),2)   .alias("avg_gpa"),
+        F.round(F.max("gpa_calculated"),2)   .alias("max_gpa"),
+        F.round(F.min("gpa_calculated"),2)   .alias("min_gpa"),
+        F.round(F.stddev("gpa_calculated"),2).alias("gpa_stddev"),
+        F.round(F.avg("attendance_rate"),2)  .alias("avg_attendance"),
+        # grade distribution
+        F.round(F.sum(F.when(F.col("grade")=="A",1).otherwise(0)) / F.count("*") * 100, 1).alias("pct_grade_A"),
+        F.round(F.sum(F.when(F.col("grade")=="F",1).otherwise(0)) / F.count("*") * 100, 1).alias("pct_fail"),
+        F.round(F.sum(F.col("is_improved").cast("int")) / F.count("*") * 100, 1).alias("pct_improved"),
+    )
+    .withColumn("performance_rank",
+        F.rank().over(Window.partitionBy("semester").orderBy(F.col("avg_gpa").desc()))
+    )
+    .withColumn("gold_updated_at", F.current_timestamp())
+)
+
+major_analytics.write.format("delta").mode("overwrite") \
+               .option("overwriteSchema","true").save(GOLD_PATH_MAJOR)
+print(f"✅ Gold major analytics → {GOLD_PATH_MAJOR}")
+major_analytics.orderBy(F.col("avg_gpa").desc()).show(10)
+
+# COMMAND ----------
+# MAGIC %md ## 4 · Gold Table C — Subject Analytics
+
+# COMMAND ----------
+subject_analytics = (
+    silver
+    .groupBy("subject","semester")
+    .agg(
+        F.count("student_id")                .alias("enrollments"),
+        F.round(F.avg("gpa_calculated"),2)   .alias("avg_gpa"),
+        F.round(F.avg("midterm_score"),2)    .alias("avg_midterm"),
+        F.round(F.avg("final_score"),2)      .alias("avg_final"),
+        F.round(F.avg("attendance_rate"),2)  .alias("avg_attendance"),
+        F.round(F.sum(F.when(F.col("grade")=="A",1).otherwise(0)) / F.count("*") * 100, 1).alias("pass_A_rate"),
+        F.round(F.sum(F.when(F.col("grade")=="F",1).otherwise(0)) / F.count("*") * 100, 1).alias("fail_rate"),
+        F.round(F.corr("midterm_score","final_score"),3).alias("mid_final_corr"),
+    )
+    .withColumn("difficulty_label",
+        F.when(F.col("fail_rate") >= 30, "Hard")
+        .when(F.col("fail_rate") >= 15,  "Medium")
+        .otherwise("Easy")
+    )
+    .withColumn("gold_updated_at", F.current_timestamp())
+)
+
+subject_analytics.write.format("delta").mode("overwrite") \
+                 .option("overwriteSchema","true").save(GOLD_PATH_SUBJ)
+print(f"✅ Gold subject analytics → {GOLD_PATH_SUBJ}")
+subject_analytics.orderBy("fail_rate", ascending=False).show()
+
+# COMMAND ----------
+# MAGIC %md ## 5 · Gold Table D — ML Feature Store
+
+# COMMAND ----------
+# Aggregate per-student features for ML (e.g., dropout prediction)
+ml_features = (
+    silver
+    .groupBy("student_id","semester")
+    .agg(
+        F.avg("midterm_score")                       .alias("feat_avg_midterm"),
+        F.avg("final_score")                         .alias("feat_avg_final"),
+        F.avg("attendance_rate")                     .alias("feat_avg_attendance"),
+        F.avg("gpa_calculated")                      .alias("feat_avg_gpa"),
+        F.stddev("gpa_calculated")                   .alias("feat_gpa_stddev"),
+        F.count("subject")                           .alias("feat_subject_count"),
+        F.sum(F.col("is_improved").cast("int"))      .alias("feat_improved_count"),
+        F.sum(F.when(F.col("grade")=="F",1).otherwise(0)).alias("feat_fail_count"),
+        F.max("year_of_study")                       .alias("feat_year_of_study"),
+        F.first("major")                             .alias("major"),
+    )
+    # ── label: at-risk if avg_gpa < 5.5 OR fail_count >= 2 ───────────────────
+    .withColumn("label_at_risk",
+        ((F.col("feat_avg_gpa") < 5.5) | (F.col("feat_fail_count") >= 2)).cast("int")
+    )
+    .withColumn("gold_updated_at", F.current_timestamp())
+)
+
+ml_features.write.format("delta").mode("overwrite") \
+           .option("overwriteSchema","true").save(GOLD_PATH_ML)
+print(f"✅ Gold ML features → {GOLD_PATH_ML}")
+
+at_risk = ml_features.filter(F.col("label_at_risk")==1).count()
+total   = ml_features.count()
+print(f"   At-risk students : {at_risk} / {total}  ({round(at_risk/total*100,1)}%)")
+
+# COMMAND ----------
+# MAGIC %md ## 6 · Register all Gold Tables
+
+# COMMAND ----------
+tables = {
+    "gold_student_gpa_summary":  GOLD_PATH_GPA,
+    "gold_major_analytics":      GOLD_PATH_MAJOR,
+    "gold_subject_analytics":    GOLD_PATH_SUBJ,
+    "gold_ml_features":          GOLD_PATH_ML,
+}
+for tbl_name, path in tables.items():
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {tbl_name}
+        USING DELTA LOCATION '{path}'
+    """)
+    print(f"  ✅ Registered: {tbl_name}")
+
+# COMMAND ----------
+# MAGIC %md ## 7 · Final Summary Dashboard Query
+
+# COMMAND ----------
+print("\n══════════════════════════════════════════════")
+print("  GOLD LAYER  —  FINAL SUMMARY")
+print("══════════════════════════════════════════════")
+
+spark.sql("""
+    SELECT
+        overall_grade,
+        COUNT(*)                      AS students,
+        ROUND(AVG(avg_gpa),2)        AS mean_gpa,
+        ROUND(AVG(avg_attendance),2) AS mean_attendance
+    FROM gold_student_gpa_summary
+    GROUP BY overall_grade
+    ORDER BY overall_grade
+""").show()
+
+print("\n── Top 5 Majors by GPA ──")
+spark.sql("""
+    SELECT major, avg_gpa, student_count, pct_fail
+    FROM gold_major_analytics
+    ORDER BY avg_gpa DESC
+    LIMIT 5
+""").show()
+
+print("\n✅ 04_gold_analytics  DONE")

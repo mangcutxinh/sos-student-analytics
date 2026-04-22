@@ -1,88 +1,175 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "2"
-# ///
 # MAGIC %md
-# MAGIC # 01 – Data Ingestion
-# MAGIC **Dự án:** Hệ thống SOA Phân tích và Quản lý Kết quả Học tập Sinh viên
+# MAGIC # 01 · Data Ingestion
+# MAGIC **Pipeline:** Read CSV → Validate → Stage for Bronze
 # MAGIC
-# MAGIC Notebook này thực hiện:
-# MAGIC - Đọc file CSV từ DBFS
-# MAGIC - Kiểm tra schema và chất lượng dữ liệu
-# MAGIC - Preview dữ liệu đầu vào
+# MAGIC | Step | Action |
+# MAGIC |------|--------|
+# MAGIC | 1 | Mount / locate source CSV |
+# MAGIC | 2 | Read with explicit schema |
+# MAGIC | 3 | Row-level validation |
+# MAGIC | 4 | Write staging Parquet → DBFS |
 
 # COMMAND ----------
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, StringType,
+    IntegerType, DoubleType, DateType
+)
+import logging
 
-# MAGIC %md ## 1. Đọc dữ liệu từ DBFS
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("01_data_ingestion")
 
-# COMMAND ----------
-
-file_path = "/Volumes/main/default/sos_data/student_score_dataset.csv"
-df_raw = spark.read.format("csv") \
-    .option("header", "true") \
-    .option("inferSchema", "true") \
-    .load(file_path)
-
-print(f"✅ Đọc thành công: {df_raw.count()} sinh viên")
-print(f"📋 Số cột: {len(df_raw.columns)}")
-
-# COMMAND ----------
-
-# MAGIC %md ## 2. Kiểm tra schema
+spark = SparkSession.builder.getOrCreate()
+spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
 
 # COMMAND ----------
-
-df_raw.printSchema()
-
-# COMMAND ----------
-
-# MAGIC %md ## 3. Preview dữ liệu
+# MAGIC %md ## Config
 
 # COMMAND ----------
+# ── paths ──────────────────────────────────────────────────────────────────────
+# On Databricks Community Edition:  upload the CSV to DBFS via UI first, then set:
+#   SOURCE_PATH = "dbfs:/FileStore/student_score_dataset.csv"
+# Locally (unit tests / CI):
+#   SOURCE_PATH = "data/mock/student_score_dataset.csv"
 
-display(df_raw)
+SOURCE_PATH   = "dbfs:/FileStore/student_score_dataset.csv"   # ← change if needed
+STAGING_PATH  = "dbfs:/delta/staging/student_scores"
+SEMESTER      = "2024-1"
 
 # COMMAND ----------
-
-# MAGIC %md ## 4. Kiểm tra chất lượng dữ liệu (null, kiểu dữ liệu)
+# MAGIC %md ## 1 · Explicit Schema
 
 # COMMAND ----------
-
-from pyspark.sql.functions import col, count, when
-
-# Đếm null từng cột
-null_counts = df_raw.select([
-    count(when(col(c).isNull(), c)).alias(c)
-    for c in df_raw.columns
+SCHEMA = StructType([
+    StructField("student_id",      StringType(),  nullable=False),
+    StructField("full_name",       StringType(),  nullable=True),
+    StructField("major",           StringType(),  nullable=True),
+    StructField("year_of_study",   IntegerType(), nullable=True),
+    StructField("subject",         StringType(),  nullable=True),
+    StructField("midterm_score",   DoubleType(),  nullable=True),
+    StructField("final_score",     DoubleType(),  nullable=True),
+    StructField("attendance_rate", DoubleType(),  nullable=True),
+    StructField("gpa",             DoubleType(),  nullable=True),
+    StructField("grade",           StringType(),  nullable=True),
+    StructField("exam_date",       StringType(),  nullable=True),   # cast later
+    StructField("semester",        StringType(),  nullable=True),
 ])
-print("🔍 Số lượng NULL theo cột:")
-display(null_counts)
 
 # COMMAND ----------
-
-# Thống kê mô tả
-print("📊 Thống kê mô tả các cột số:")
-display(df_raw.describe())
+# MAGIC %md ## 2 · Read CSV
 
 # COMMAND ----------
+logger.info(f"Reading CSV from: {SOURCE_PATH}")
 
-# Kiểm tra phạm vi điểm hợp lệ
-invalid_quiz   = df_raw.filter((col("quiz1_marks") < 0) | (col("quiz1_marks") > 10))
-invalid_mid    = df_raw.filter((col("midterm_marks") < 0) | (col("midterm_marks") > 30))
-invalid_final  = df_raw.filter((col("final_marks") < 0) | (col("final_marks") > 50))
+raw_df = (
+    spark.read
+    .option("header", "true")
+    .option("encoding", "UTF-8")
+    .schema(SCHEMA)
+    .csv(SOURCE_PATH)
+)
 
-print(f"⚠️  Quiz không hợp lệ  : {invalid_quiz.count()} dòng")
-print(f"⚠️  Midterm không hợp lệ: {invalid_mid.count()} dòng")
-print(f"⚠️  Final không hợp lệ  : {invalid_final.count()} dòng")
+total_rows = raw_df.count()
+logger.info(f"Total rows read: {total_rows}")
+print(f"✅ Loaded {total_rows} rows")
+raw_df.printSchema()
+raw_df.show(5, truncate=False)
 
 # COMMAND ----------
-
-# MAGIC %md ## 5. Lưu dữ liệu tạm để các notebook sau sử dụng
+# MAGIC %md ## 3 · Validation
 
 # COMMAND ----------
+def validate(df):
+    """Return (valid_df, invalid_df, summary_dict)."""
+    # ── rules ──────────────────────────────────────────────────────────────────
+    validated = df.withColumn(
+        "_errors",
+        F.array(
+            F.when(F.col("student_id").isNull(),                        F.lit("missing student_id")),
+            F.when(F.col("midterm_score").isNull() |
+                   (F.col("midterm_score") < 0) |
+                   (F.col("midterm_score") > 10),                        F.lit("invalid midterm_score")),
+            F.when(F.col("final_score").isNull() |
+                   (F.col("final_score") < 0) |
+                   (F.col("final_score") > 10),                          F.lit("invalid final_score")),
+            F.when(F.col("attendance_rate").isNull() |
+                   (F.col("attendance_rate") < 0) |
+                   (F.col("attendance_rate") > 1),                       F.lit("invalid attendance_rate")),
+            F.when(F.col("year_of_study").isNull() |
+                   (F.col("year_of_study") < 1) |
+                   (F.col("year_of_study") > 6),                         F.lit("invalid year_of_study")),
+            F.when(~F.col("grade").isin("A","B","C","D","F"),            F.lit("invalid grade")),
+        )
+    ).withColumn(
+        "_errors", F.array_compact(F.col("_errors"))   # drop nulls
+    ).withColumn(
+        "_is_valid", F.size(F.col("_errors")) == 0
+    )
 
-# Lưu vào view tạm thời để dùng trong session
-df_raw.createOrReplaceTempView("raw_students")
-print("✅ Đã tạo temp view: raw_students")
-print("➡️  Tiếp theo: chạy notebook 02_bronze_layer.py")
+    valid_df   = validated.filter(F.col("_is_valid")).drop("_errors","_is_valid")
+    invalid_df = validated.filter(~F.col("_is_valid"))
+
+    v_count = valid_df.count()
+    i_count = invalid_df.count()
+    summary = {
+        "total":   total_rows,
+        "valid":   v_count,
+        "invalid": i_count,
+        "pass_rate": round(v_count / total_rows * 100, 2) if total_rows else 0,
+    }
+    return valid_df, invalid_df, summary
+
+valid_df, invalid_df, summary = validate(raw_df)
+
+print("=" * 50)
+print("VALIDATION SUMMARY")
+print("=" * 50)
+for k, v in summary.items():
+    print(f"  {k:<12}: {v}")
+print("=" * 50)
+
+if summary["invalid"] > 0:
+    print("\n⚠️  Invalid rows sample:")
+    invalid_df.select("student_id","_errors").show(10, truncate=False)
+
+# COMMAND ----------
+# MAGIC %md ## 4 · Add Ingestion Metadata & Write Staging
+
+# COMMAND ----------
+from datetime import datetime
+
+staged_df = valid_df.withColumns({
+    "_ingestion_ts":   F.lit(datetime.utcnow().isoformat()),
+    "_source_file":    F.lit(SOURCE_PATH),
+    "_semester":       F.lit(SEMESTER),
+    "_pipeline_stage": F.lit("staging"),
+})
+
+(
+    staged_df.write
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .parquet(STAGING_PATH)
+)
+
+logger.info(f"Staging written to {STAGING_PATH}")
+print(f"\n✅ Staging complete → {STAGING_PATH}")
+print(f"   Rows written: {summary['valid']}")
+
+# COMMAND ----------
+# MAGIC %md ## 5 · Quick Profile
+
+# COMMAND ----------
+print("\n── Score distribution ──")
+valid_df.groupBy("grade").count().orderBy("grade").show()
+
+print("── Missing values ──")
+for col_name in valid_df.columns:
+    null_count = valid_df.filter(F.col(col_name).isNull()).count()
+    if null_count > 0:
+        print(f"  {col_name}: {null_count} nulls")
+
+print("\n✅ 01_data_ingestion  DONE")
