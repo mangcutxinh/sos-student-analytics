@@ -11,6 +11,7 @@
 # MAGIC | 4 | Write staging Parquet → DBFS |
 
 # COMMAND ----------
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -26,9 +27,11 @@ spark = SparkSession.builder.getOrCreate()
 spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
 
 # COMMAND ----------
+
 # MAGIC %md ## Config
 
 # COMMAND ----------
+
 # ── paths ──────────────────────────────────────────────────────────────────────
 # On Databricks Community Edition:  upload the CSV to DBFS via UI first, then set:
 #   SOURCE_PATH = "/Volumes/workspace/default/datasets/student_score_dataset.csv"
@@ -46,12 +49,14 @@ try:
 except Exception:
     SEMESTER = "2024-1"
 
-STAGING_PATH = "dbfs:/delta/staging/student_scores"
+STAGING_PATH = "/Volumes/workspace/default/staging/student_scores"
 
 # COMMAND ----------
+
 # MAGIC %md ## 1 · Explicit Schema
 
 # COMMAND ----------
+
 SCHEMA = StructType([
     StructField("student_id",        IntegerType(), nullable=False),
     StructField("name",              StringType(),  nullable=True),
@@ -68,9 +73,11 @@ SCHEMA = StructType([
 ])
 
 # COMMAND ----------
+
 # MAGIC %md ## 2 · Read CSV
 
 # COMMAND ----------
+
 logger.info(f"Reading CSV from: {SOURCE_PATH}")
 
 raw_df = (
@@ -88,9 +95,11 @@ raw_df.printSchema()
 raw_df.show(5, truncate=False)
 
 # COMMAND ----------
+
 # MAGIC %md ## 3 · Validation
 
 # COMMAND ----------
+
 def validate(df):
     """Return (valid_df, invalid_df, summary_dict)."""
     # ── rules ──────────────────────────────────────────────────────────────────
@@ -159,9 +168,12 @@ if summary["invalid"] > 0:
     invalid_df.select("student_id","_errors").show(10, truncate=False)
 
 # COMMAND ----------
+
 # MAGIC %md ## 4 · Add Ingestion Metadata & Write Staging
 
 # COMMAND ----------
+
+# DBTITLE 1,Write to Unity Catalog staging table
 from datetime import datetime
 
 staged_df = valid_df.withColumns({
@@ -176,17 +188,19 @@ staged_df = valid_df.withColumns({
     staged_df.write
     .mode("overwrite")
     .option("overwriteSchema", "true")
-    .parquet(STAGING_PATH)
+    .saveAsTable("workspace.default.student_scores_staging")
 )
 
-logger.info(f"Staging written to {STAGING_PATH}")
-print(f"\n✅ Staging complete → {STAGING_PATH}")
+logger.info(f"Staging written to workspace.default.student_scores_staging")
+print(f"\n✅ Staging complete → workspace.default.student_scores_staging")
 print(f"   Rows written: {summary['valid']}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 5 · Quick Profile
 
 # COMMAND ----------
+
 print("\n── Score distribution (letter grade) ──")
 valid_df.withColumn(
     "_grade_10_preview",

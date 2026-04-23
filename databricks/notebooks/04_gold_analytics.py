@@ -6,6 +6,7 @@
 # MAGIC Gold tables are consumption-ready:  BI dashboards, API queries, ML models.
 
 # COMMAND ----------
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -21,6 +22,7 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # COMMAND ----------
+
 SILVER_PATH      = "dbfs:/delta/silver/student_scores"
 GOLD_PATH_GPA    = "dbfs:/delta/gold/student_gpa_summary"
 GOLD_PATH_COHORT = "dbfs:/delta/gold/cohort_analytics"
@@ -28,16 +30,23 @@ GOLD_PATH_ATTEND = "dbfs:/delta/gold/attendance_analytics"
 GOLD_PATH_ML     = "dbfs:/delta/gold/ml_features"
 
 # COMMAND ----------
+
 # MAGIC %md ## 1 · Read Silver
 
 # COMMAND ----------
-silver = spark.read.format("delta").load(SILVER_PATH)
+
+# DBTITLE 1,Cell 5
+# Read from Unity Catalog Silver table instead of DBFS path
+silver = spark.table("workspace.default.silver_student_scores")
 print(f"✅ Silver rows: {silver.count()}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 2 · Gold Table A — Student Score Summary
 
 # COMMAND ----------
+
+# DBTITLE 1,Cell 7
 # Per-student summary for the semester
 gpa_summary = (
     silver
@@ -72,14 +81,17 @@ gpa_summary = (
 )
 
 gpa_summary.write.format("delta").mode("overwrite") \
-           .option("overwriteSchema","true").save(GOLD_PATH_GPA)
-print(f"✅ Gold student summary → {GOLD_PATH_GPA}  ({gpa_summary.count()} rows)")
+           .option("overwriteSchema","true").saveAsTable("workspace.default.gold_student_gpa_summary")
+print(f"✅ Gold student summary → workspace.default.gold_student_gpa_summary  ({gpa_summary.count()} rows)")
 gpa_summary.show(5, truncate=False)
 
 # COMMAND ----------
+
 # MAGIC %md ## 3 · Gold Table B — Cohort Analytics (semester × gender × age band)
 
 # COMMAND ----------
+
+# DBTITLE 1,Cell 9
 cohort_analytics = (
     silver
     .withColumn("age_band",
@@ -112,14 +124,17 @@ cohort_analytics = (
 )
 
 cohort_analytics.write.format("delta").mode("overwrite") \
-                .option("overwriteSchema","true").save(GOLD_PATH_COHORT)
-print(f"✅ Gold cohort analytics → {GOLD_PATH_COHORT}")
+                .option("overwriteSchema","true").saveAsTable("workspace.default.gold_cohort_analytics")
+print(f"✅ Gold cohort analytics → workspace.default.gold_cohort_analytics")
 cohort_analytics.orderBy(F.col("avg_grade_10").desc()).show(10)
 
 # COMMAND ----------
+
 # MAGIC %md ## 4 · Gold Table C — Attendance-Performance Analytics
 
 # COMMAND ----------
+
+# DBTITLE 1,Cell 11
 attendance_analytics = (
     silver
     .withColumn("attendance_bin",
@@ -151,14 +166,17 @@ attendance_analytics = (
 )
 
 attendance_analytics.write.format("delta").mode("overwrite") \
-                    .option("overwriteSchema","true").save(GOLD_PATH_ATTEND)
-print(f"✅ Gold attendance analytics → {GOLD_PATH_ATTEND}")
+                    .option("overwriteSchema","true").saveAsTable("workspace.default.gold_attendance_analytics")
+print(f"✅ Gold attendance analytics → workspace.default.gold_attendance_analytics")
 attendance_analytics.orderBy("semester", "attendance_bin").show()
 
 # COMMAND ----------
+
 # MAGIC %md ## 5 · Gold Table D — ML Feature Store
 
 # COMMAND ----------
+
+# DBTITLE 1,Cell 13
 # Per-student features for ML (e.g., at-risk / dropout prediction)
 ml_features = (
     silver
@@ -182,34 +200,37 @@ ml_features = (
 )
 
 ml_features.write.format("delta").mode("overwrite") \
-           .option("overwriteSchema","true").save(GOLD_PATH_ML)
-print(f"✅ Gold ML features → {GOLD_PATH_ML}")
+           .option("overwriteSchema","true").saveAsTable("workspace.default.gold_ml_features")
+print(f"✅ Gold ML features → workspace.default.gold_ml_features")
 
 at_risk = ml_features.filter(F.col("label_at_risk")==1).count()
 total   = ml_features.count()
 print(f"   At-risk students : {at_risk} / {total}  ({round(at_risk/total*100,1)}%)")
 
 # COMMAND ----------
+
 # MAGIC %md ## 6 · Register all Gold Tables
 
 # COMMAND ----------
-tables = {
-    "gold_student_gpa_summary":  GOLD_PATH_GPA,
-    "gold_cohort_analytics":     GOLD_PATH_COHORT,
-    "gold_attendance_analytics": GOLD_PATH_ATTEND,
-    "gold_ml_features":          GOLD_PATH_ML,
-}
-for tbl_name, path in tables.items():
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {tbl_name}
-        USING DELTA LOCATION '{path}'
-    """)
-    print(f"  ✅ Registered: {tbl_name}")
+
+# DBTITLE 1,Cell 15
+# Verify Gold tables exist in Unity Catalog
+tables = [
+    "workspace.default.gold_student_gpa_summary",
+    "workspace.default.gold_cohort_analytics",
+    "workspace.default.gold_attendance_analytics",
+    "workspace.default.gold_ml_features",
+]
+for tbl_name in tables:
+    spark.table(tbl_name)
+    print(f"  ✅ Verified: {tbl_name}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 7 · Final Summary Dashboard Query
 
 # COMMAND ----------
+
 print("\n══════════════════════════════════════════════")
 print("  GOLD LAYER  —  FINAL SUMMARY")
 print("══════════════════════════════════════════════")

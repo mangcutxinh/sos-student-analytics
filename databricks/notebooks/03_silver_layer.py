@@ -6,6 +6,7 @@
 # MAGIC Silver = deduplicated, typed, business-rule enriched data.
 
 # COMMAND ----------
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 # (DateType no longer needed after schema alignment)
@@ -21,21 +22,28 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # COMMAND ----------
+
 BRONZE_PATH = "dbfs:/delta/bronze/student_scores"
 SILVER_PATH = "dbfs:/delta/silver/student_scores"
 SILVER_TABLE = "silver_student_scores"
 
 # COMMAND ----------
+
 # MAGIC %md ## 1 · Read Bronze
 
 # COMMAND ----------
-bronze_df = spark.read.format("delta").load(BRONZE_PATH)
+
+# DBTITLE 1,Cell 5
+# Read from Unity Catalog Bronze table instead of DBFS path
+bronze_df = spark.table("workspace.default.bronze_student_scores")
 print(f"✅ Bronze rows: {bronze_df.count()}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 2 · Deduplication
 
 # COMMAND ----------
+
 from pyspark.sql.window import Window
 
 dedup_window = Window.partitionBy("student_id", "semester") \
@@ -53,9 +61,11 @@ print(f"  Duplicates removed : {removed}")
 print(f"  Rows after dedup   : {deduped_df.count()}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 3 · Type Casting & Cleaning
 
 # COMMAND ----------
+
 cleaned_df = (
     deduped_df
     # ── normalise strings ──────────────────────────────────────────────────────
@@ -77,9 +87,11 @@ cleaned_df = (
 )
 
 # COMMAND ----------
+
 # MAGIC %md ## 4 · Business Enrichment
 
 # COMMAND ----------
+
 # ── constants ──────────────────────────────────────────────────────────────────
 MAX_SESSIONS = 20   # 10 lecture sessions + 10 lab sessions per semester; adjust to match your curriculum
 
@@ -166,11 +178,19 @@ enriched_df.select(
 ).show(10, truncate=False)
 
 # COMMAND ----------
+
 # MAGIC %md ## 5 · Write Delta Silver (SCD Type 1 MERGE)
 
 # COMMAND ----------
-if DeltaTable.isDeltaTable(spark, SILVER_PATH):
-    silver_table = DeltaTable.forPath(spark, SILVER_PATH)
+
+# DBTITLE 1,Cell 13
+# Write to Unity Catalog table instead of DBFS path
+silver_table_name = "workspace.default.silver_student_scores"
+
+try:
+    # Check if table exists by attempting to load it
+    spark.table(silver_table_name)
+    silver_table = DeltaTable.forName(spark, silver_table_name)
     (
         silver_table.alias("tgt")
         .merge(
@@ -182,28 +202,38 @@ if DeltaTable.isDeltaTable(spark, SILVER_PATH):
         .execute()
     )
     print("✅ Silver MERGE complete")
-else:
+except Exception:
     (
         enriched_df.write
         .format("delta")
         .mode("overwrite")
         .option("overwriteSchema", "true")
         .partitionBy("semester", "letter_grade")
-        .save(SILVER_PATH)
+        .saveAsTable(silver_table_name)
     )
-    print(f"✅ Silver table created: {SILVER_PATH}")
+    print(f"✅ Silver table created: {silver_table_name}")
 
 # COMMAND ----------
-spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {SILVER_TABLE}
-    USING DELTA LOCATION '{SILVER_PATH}'
-""")
+
+# DBTITLE 1,Cell 14
+# Table already created in Unity Catalog in previous cell
+silver_table_name = "workspace.default.silver_student_scores"
+try:
+    spark.table(silver_table_name)
+    print(f"✅ Table verified: {silver_table_name}")
+except Exception as e:
+    print(f"⚠️ Table not found: {silver_table_name}")
+    print(f"   Error: {e}")
 
 # COMMAND ----------
+
 # MAGIC %md ## 6 · Quality Checks
 
 # COMMAND ----------
-silver_df = spark.read.format("delta").load(SILVER_PATH)
+
+# DBTITLE 1,Cell 16
+# Read from Unity Catalog Silver table instead of DBFS path
+silver_df = spark.table("workspace.default.silver_student_scores")
 
 print("\n── Silver Stats ─────────────────────────────")
 print(f"  Total rows        : {silver_df.count()}")

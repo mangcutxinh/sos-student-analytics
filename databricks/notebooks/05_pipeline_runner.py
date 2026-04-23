@@ -11,6 +11,7 @@
 # MAGIC Each notebook is called via `%run` (same cluster) so variables and SparkSession are shared.
 
 # COMMAND ----------
+
 import time
 import json
 from datetime import datetime
@@ -19,9 +20,11 @@ from pyspark.sql import SparkSession
 spark = SparkSession.builder.getOrCreate()
 
 # COMMAND ----------
+
 # MAGIC %md ## Pipeline Config
 
 # COMMAND ----------
+
 # ── These can be overridden by Databricks Job Parameters ──────────────────────
 dbutils.widgets.text("source_path",  "/Volumes/workspace/default/datasets/student_score_dataset.csv", "Source CSV Path")
 dbutils.widgets.text("semester",     "2024-1",                                                          "Semester")
@@ -52,9 +55,11 @@ print(f"║  started_at  : {datetime.utcnow().isoformat():<34}║")
 print(f"╚══════════════════════════════════════════════════╝")
 
 # COMMAND ----------
+
 # MAGIC %md ## Stage Execution
 
 # COMMAND ----------
+
 pipeline_log = []
 
 def run_stage(name: str, notebook_path: str, params: dict = None, timeout: int = 1800):
@@ -84,6 +89,7 @@ def run_stage(name: str, notebook_path: str, params: dict = None, timeout: int =
     })
 
 # COMMAND ----------
+
 pipeline_start = time.time()
 failed_stages  = []
 
@@ -120,9 +126,11 @@ except Exception as e:
     failed_stages.append(str(e))
 
 # COMMAND ----------
+
 # MAGIC %md ## Pipeline Summary
 
 # COMMAND ----------
+
 total_duration = round(time.time() - pipeline_start, 1)
 
 print("\n╔══════════════════════════════════════════════════════╗")
@@ -136,13 +144,24 @@ print(f"║  Total duration : {total_duration:<35}║")
 print(f"╚══════════════════════════════════════════════════════╝")
 
 # COMMAND ----------
+
 # MAGIC %md ## Write Run Log to Delta
 
 # COMMAND ----------
+
+# DBTITLE 1,Cell 11
 from pyspark.sql import Row
+import uuid
+
+# Get run_id from job context if available, otherwise generate a unique ID
+try:
+    _ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    run_id = _ctx.tags().get("jobId").get() + "_" + _ctx.tags().get("runId").get()
+except Exception:
+    run_id = "manual_" + str(uuid.uuid4())[:8]
 
 log_row = Row(
-    run_id          = dbutils.notebook.entry_point.getDbutils().notebook().getContext().currentRunId().toString(),
+    run_id          = run_id,
     pipeline_status = pipeline_status,
     semester        = SEMESTER,
     source_path     = SOURCE_PATH,
@@ -153,10 +172,11 @@ log_row = Row(
 )
 
 log_df = spark.createDataFrame([log_row])
-log_df.write.format("delta").mode("append").save("dbfs:/delta/pipeline_runs")
-print("✅ Run log written to dbfs:/delta/pipeline_runs")
+log_df.write.format("delta").mode("append").saveAsTable("workspace.default.pipeline_runs")
+print("✅ Run log written to workspace.default.pipeline_runs")
 
 # COMMAND ----------
+
 if pipeline_status == "FAILED":
     raise Exception(f"Pipeline failed at stages: {failed_stages}")
 
