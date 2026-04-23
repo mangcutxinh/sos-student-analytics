@@ -23,8 +23,8 @@ spark = SparkSession.builder \
 # COMMAND ----------
 SILVER_PATH      = "dbfs:/delta/silver/student_scores"
 GOLD_PATH_GPA    = "dbfs:/delta/gold/student_gpa_summary"
-GOLD_PATH_MAJOR  = "dbfs:/delta/gold/major_analytics"
-GOLD_PATH_SUBJ   = "dbfs:/delta/gold/subject_analytics"
+GOLD_PATH_COHORT = "dbfs:/delta/gold/cohort_analytics"
+GOLD_PATH_ATTEND = "dbfs:/delta/gold/attendance_analytics"
 GOLD_PATH_ML     = "dbfs:/delta/gold/ml_features"
 
 # COMMAND ----------
@@ -35,34 +35,37 @@ silver = spark.read.format("delta").load(SILVER_PATH)
 print(f"✅ Silver rows: {silver.count()}")
 
 # COMMAND ----------
-# MAGIC %md ## 2 · Gold Table A — Student GPA Summary
+# MAGIC %md ## 2 · Gold Table A — Student Score Summary
 
 # COMMAND ----------
-# Per-student across all subjects in semester
-student_window = Window.partitionBy("student_id","semester")
-
+# Per-student summary for the semester
 gpa_summary = (
     silver
-    .groupBy("student_id","full_name","major","year_of_study","semester")
+    .groupBy("student_id", "name", "gender", "age", "semester")
     .agg(
-        F.round(F.avg("gpa_calculated"),    2).alias("avg_gpa"),
-        F.round(F.avg("midterm_score"),     2).alias("avg_midterm"),
-        F.round(F.avg("final_score"),       2).alias("avg_final"),
-        F.round(F.avg("attendance_rate"),   2).alias("avg_attendance"),
-        F.count("subject")                   .alias("subjects_count"),
-        F.sum(F.col("is_improved").cast("int")).alias("subjects_improved"),
-        F.collect_list("grade")              .alias("all_grades"),
+        F.round(F.avg("grade_10"),          2).alias("avg_grade_10"),
+        F.round(F.avg("total_score_100"),   2).alias("avg_total_score"),
+        F.round(F.avg("quiz_total_30"),     2).alias("avg_quiz_total"),
+        F.round(F.avg("midterm_marks"),     2).alias("avg_midterm"),
+        F.round(F.avg("final_marks"),       2).alias("avg_final"),
+        F.round(F.avg("attendance_ratio"),  2).alias("avg_attendance_ratio"),
+        F.round(F.avg("gpa_est_4"),         2).alias("avg_gpa_est_4"),
+        F.round(F.avg("gpa_delta"),         2).alias("avg_gpa_delta"),
+        F.first("previous_gpa")               .alias("previous_gpa"),
+        F.first("performance_tier")           .alias("performance_tier"),
+        F.first("letter_grade")               .alias("overall_letter_grade"),
+        F.sum(F.col("is_improved").cast("int")).alias("semesters_improved"),
     )
     .withColumn("overall_grade",
-        F.when(F.col("avg_gpa") >= 8.5, "A")
-        .when(F.col("avg_gpa") >= 7.0,  "B")
-        .when(F.col("avg_gpa") >= 5.5,  "C")
-        .when(F.col("avg_gpa") >= 4.0,  "D")
+        F.when(F.col("avg_grade_10") >= 8.5, "A")
+        .when(F.col("avg_grade_10") >= 7.0,  "B")
+        .when(F.col("avg_grade_10") >= 5.5,  "C")
+        .when(F.col("avg_grade_10") >= 4.0,  "D")
         .otherwise("F")
     )
     .withColumn("rank_in_semester",
         F.rank().over(
-            Window.partitionBy("semester").orderBy(F.col("avg_gpa").desc())
+            Window.partitionBy("semester").orderBy(F.col("avg_grade_10").desc())
         )
     )
     .withColumn("gold_updated_at", F.current_timestamp())
@@ -70,92 +73,110 @@ gpa_summary = (
 
 gpa_summary.write.format("delta").mode("overwrite") \
            .option("overwriteSchema","true").save(GOLD_PATH_GPA)
-print(f"✅ Gold GPA summary → {GOLD_PATH_GPA}  ({gpa_summary.count()} rows)")
+print(f"✅ Gold student summary → {GOLD_PATH_GPA}  ({gpa_summary.count()} rows)")
 gpa_summary.show(5, truncate=False)
 
 # COMMAND ----------
-# MAGIC %md ## 3 · Gold Table B — Major Analytics
+# MAGIC %md ## 3 · Gold Table B — Cohort Analytics (semester × gender × age band)
 
 # COMMAND ----------
-major_analytics = (
+cohort_analytics = (
     silver
-    .groupBy("major","semester")
+    .withColumn("age_band",
+        F.when(F.col("age") <= 19, "≤19")
+        .when(F.col("age") <= 21, "20-21")
+        .when(F.col("age") <= 23, "22-23")
+        .otherwise("24+")
+    )
+    .groupBy("semester", "gender", "age_band")
     .agg(
-        F.count("student_id")                .alias("student_count"),
-        F.round(F.avg("gpa_calculated"),2)   .alias("avg_gpa"),
-        F.round(F.max("gpa_calculated"),2)   .alias("max_gpa"),
-        F.round(F.min("gpa_calculated"),2)   .alias("min_gpa"),
-        F.round(F.stddev("gpa_calculated"),2).alias("gpa_stddev"),
-        F.round(F.avg("attendance_rate"),2)  .alias("avg_attendance"),
-        # grade distribution
-        F.round(F.sum(F.when(F.col("grade")=="A",1).otherwise(0)) / F.count("*") * 100, 1).alias("pct_grade_A"),
-        F.round(F.sum(F.when(F.col("grade")=="F",1).otherwise(0)) / F.count("*") * 100, 1).alias("pct_fail"),
-        F.round(F.sum(F.col("is_improved").cast("int")) / F.count("*") * 100, 1).alias("pct_improved"),
+        F.count("student_id")                   .alias("student_count"),
+        F.round(F.avg("grade_10"),          2)  .alias("avg_grade_10"),
+        F.round(F.max("grade_10"),          2)  .alias("max_grade_10"),
+        F.round(F.min("grade_10"),          2)  .alias("min_grade_10"),
+        F.round(F.stddev("grade_10"),       2)  .alias("grade_10_stddev"),
+        F.round(F.avg("attendance_ratio"),  2)  .alias("avg_attendance_ratio"),
+        F.round(F.avg("gpa_delta"),         2)  .alias("avg_gpa_delta"),
+        # pass / fail rates
+        F.round(F.sum(F.when(F.col("letter_grade") == "A", 1).otherwise(0))
+                / F.count("*") * 100, 1)        .alias("pct_grade_A"),
+        F.round(F.sum(F.when(F.col("letter_grade") == "F", 1).otherwise(0))
+                / F.count("*") * 100, 1)        .alias("pct_fail"),
+        F.round(F.sum(F.col("is_improved").cast("int"))
+                / F.count("*") * 100, 1)        .alias("pct_improved"),
     )
     .withColumn("performance_rank",
-        F.rank().over(Window.partitionBy("semester").orderBy(F.col("avg_gpa").desc()))
+        F.rank().over(Window.partitionBy("semester").orderBy(F.col("avg_grade_10").desc()))
     )
     .withColumn("gold_updated_at", F.current_timestamp())
 )
 
-major_analytics.write.format("delta").mode("overwrite") \
-               .option("overwriteSchema","true").save(GOLD_PATH_MAJOR)
-print(f"✅ Gold major analytics → {GOLD_PATH_MAJOR}")
-major_analytics.orderBy(F.col("avg_gpa").desc()).show(10)
+cohort_analytics.write.format("delta").mode("overwrite") \
+                .option("overwriteSchema","true").save(GOLD_PATH_COHORT)
+print(f"✅ Gold cohort analytics → {GOLD_PATH_COHORT}")
+cohort_analytics.orderBy(F.col("avg_grade_10").desc()).show(10)
 
 # COMMAND ----------
-# MAGIC %md ## 4 · Gold Table C — Subject Analytics
+# MAGIC %md ## 4 · Gold Table C — Attendance-Performance Analytics
 
 # COMMAND ----------
-subject_analytics = (
+attendance_analytics = (
     silver
-    .groupBy("subject","semester")
+    .withColumn("attendance_bin",
+        F.when(F.col("attendance_ratio") >= 0.9,  "90-100%")
+        .when(F.col("attendance_ratio") >= 0.75, "75-89%")
+        .when(F.col("attendance_ratio") >= 0.5,  "50-74%")
+        .otherwise("<50%")
+    )
+    .groupBy("semester", "attendance_bin")
     .agg(
-        F.count("student_id")                .alias("enrollments"),
-        F.round(F.avg("gpa_calculated"),2)   .alias("avg_gpa"),
-        F.round(F.avg("midterm_score"),2)    .alias("avg_midterm"),
-        F.round(F.avg("final_score"),2)      .alias("avg_final"),
-        F.round(F.avg("attendance_rate"),2)  .alias("avg_attendance"),
-        F.round(F.sum(F.when(F.col("grade")=="A",1).otherwise(0)) / F.count("*") * 100, 1).alias("pass_A_rate"),
-        F.round(F.sum(F.when(F.col("grade")=="F",1).otherwise(0)) / F.count("*") * 100, 1).alias("fail_rate"),
-        F.round(F.corr("midterm_score","final_score"),3).alias("mid_final_corr"),
+        F.count("student_id")                  .alias("student_count"),
+        F.round(F.avg("grade_10"),         2)  .alias("avg_grade_10"),
+        F.round(F.avg("total_score_100"),  2)  .alias("avg_total_score"),
+        F.round(F.avg("quiz_total_30"),    2)  .alias("avg_quiz_total"),
+        F.round(F.avg("midterm_marks"),    2)  .alias("avg_midterm"),
+        F.round(F.avg("final_marks"),      2)  .alias("avg_final"),
+        F.round(F.sum(F.when(F.col("letter_grade") == "A", 1).otherwise(0))
+                / F.count("*") * 100, 1)       .alias("pass_A_rate"),
+        F.round(F.sum(F.when(F.col("letter_grade") == "F", 1).otherwise(0))
+                / F.count("*") * 100, 1)       .alias("fail_rate"),
+        F.round(F.corr("attendance_ratio", "grade_10"), 3).alias("attendance_grade_corr"),
     )
     .withColumn("difficulty_label",
-        F.when(F.col("fail_rate") >= 30, "Hard")
-        .when(F.col("fail_rate") >= 15,  "Medium")
-        .otherwise("Easy")
+        F.when(F.col("fail_rate") >= 30, "High Risk")
+        .when(F.col("fail_rate") >= 15,  "Medium Risk")
+        .otherwise("Low Risk")
     )
     .withColumn("gold_updated_at", F.current_timestamp())
 )
 
-subject_analytics.write.format("delta").mode("overwrite") \
-                 .option("overwriteSchema","true").save(GOLD_PATH_SUBJ)
-print(f"✅ Gold subject analytics → {GOLD_PATH_SUBJ}")
-subject_analytics.orderBy("fail_rate", ascending=False).show()
+attendance_analytics.write.format("delta").mode("overwrite") \
+                    .option("overwriteSchema","true").save(GOLD_PATH_ATTEND)
+print(f"✅ Gold attendance analytics → {GOLD_PATH_ATTEND}")
+attendance_analytics.orderBy("semester", "attendance_bin").show()
 
 # COMMAND ----------
 # MAGIC %md ## 5 · Gold Table D — ML Feature Store
 
 # COMMAND ----------
-# Aggregate per-student features for ML (e.g., dropout prediction)
+# Per-student features for ML (e.g., at-risk / dropout prediction)
 ml_features = (
     silver
-    .groupBy("student_id","semester")
-    .agg(
-        F.avg("midterm_score")                       .alias("feat_avg_midterm"),
-        F.avg("final_score")                         .alias("feat_avg_final"),
-        F.avg("attendance_rate")                     .alias("feat_avg_attendance"),
-        F.avg("gpa_calculated")                      .alias("feat_avg_gpa"),
-        F.stddev("gpa_calculated")                   .alias("feat_gpa_stddev"),
-        F.count("subject")                           .alias("feat_subject_count"),
-        F.sum(F.col("is_improved").cast("int"))      .alias("feat_improved_count"),
-        F.sum(F.when(F.col("grade")=="F",1).otherwise(0)).alias("feat_fail_count"),
-        F.max("year_of_study")                       .alias("feat_year_of_study"),
-        F.first("major")                             .alias("major"),
+    .select(
+        "student_id", "semester", "name", "age", "gender",
+        "quiz1_marks", "quiz2_marks", "quiz3_marks",
+        "midterm_marks", "final_marks",
+        "quiz_total_30", "midterm_component_20", "final_component_50",
+        "total_score_100", "grade_10", "gpa_est_4",
+        "previous_gpa", "gpa_delta",
+        "lectures_attended", "labs_attended",
+        "attendance_total", "attendance_ratio",
+        "letter_grade", "performance_tier",
+        "is_improved",
     )
-    # ── label: at-risk if avg_gpa < 5.5 OR fail_count >= 2 ───────────────────
+    # ── label: at-risk if grade_10 < 5.5 (failing threshold) ─────────────────
     .withColumn("label_at_risk",
-        ((F.col("feat_avg_gpa") < 5.5) | (F.col("feat_fail_count") >= 2)).cast("int")
+        (F.col("grade_10") < 5.5).cast("int")
     )
     .withColumn("gold_updated_at", F.current_timestamp())
 )
@@ -174,8 +195,8 @@ print(f"   At-risk students : {at_risk} / {total}  ({round(at_risk/total*100,1)}
 # COMMAND ----------
 tables = {
     "gold_student_gpa_summary":  GOLD_PATH_GPA,
-    "gold_major_analytics":      GOLD_PATH_MAJOR,
-    "gold_subject_analytics":    GOLD_PATH_SUBJ,
+    "gold_cohort_analytics":     GOLD_PATH_COHORT,
+    "gold_attendance_analytics": GOLD_PATH_ATTEND,
     "gold_ml_features":          GOLD_PATH_ML,
 }
 for tbl_name, path in tables.items():
@@ -196,20 +217,20 @@ print("════════════════════════�
 spark.sql("""
     SELECT
         overall_grade,
-        COUNT(*)                      AS students,
-        ROUND(AVG(avg_gpa),2)        AS mean_gpa,
-        ROUND(AVG(avg_attendance),2) AS mean_attendance
+        COUNT(*)                          AS students,
+        ROUND(AVG(avg_grade_10),    2)   AS mean_grade_10,
+        ROUND(AVG(avg_attendance_ratio),2) AS mean_attendance_ratio
     FROM gold_student_gpa_summary
     GROUP BY overall_grade
     ORDER BY overall_grade
 """).show()
 
-print("\n── Top 5 Majors by GPA ──")
+print("\n── Cohort GPA by Gender & Age Band ──")
 spark.sql("""
-    SELECT major, avg_gpa, student_count, pct_fail
-    FROM gold_major_analytics
-    ORDER BY avg_gpa DESC
-    LIMIT 5
+    SELECT gender, age_band, avg_grade_10, student_count, pct_fail
+    FROM gold_cohort_analytics
+    ORDER BY avg_grade_10 DESC
+    LIMIT 10
 """).show()
 
 print("\n✅ 04_gold_analytics  DONE")

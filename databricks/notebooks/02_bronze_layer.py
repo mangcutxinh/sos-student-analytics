@@ -48,9 +48,25 @@ bronze_df = staged_df.withColumns({
     "bronze_loaded_at":   F.current_timestamp(),
     "bronze_loaded_date": F.current_date(),
     "bronze_batch_id":    F.lit(datetime.utcnow().strftime("%Y%m%d_%H%M%S")),
-    "bronze_row_hash":    F.md5(F.concat_ws("|",
-                              F.col("student_id"),
-                              F.col("subject"),
+    # business_key: stable identity per student × semester
+    "business_key":       F.md5(F.concat_ws("|",
+                              F.col("student_id").cast("string"),
+                              F.col("semester"),
+                          )),
+    # record_hash: detects any change in source values (used to skip true duplicates)
+    "record_hash":        F.md5(F.concat_ws("|",
+                              F.col("student_id").cast("string"),
+                              F.col("name"),
+                              F.col("age").cast("string"),
+                              F.col("gender"),
+                              F.col("quiz1_marks").cast("string"),
+                              F.col("quiz2_marks").cast("string"),
+                              F.col("quiz3_marks").cast("string"),
+                              F.col("midterm_marks").cast("string"),
+                              F.col("final_marks").cast("string"),
+                              F.col("previous_gpa").cast("string"),
+                              F.col("lectures_attended").cast("string"),
+                              F.col("labs_attended").cast("string"),
                               F.col("semester"),
                           )),
 })
@@ -67,7 +83,7 @@ if DeltaTable.isDeltaTable(spark, BRONZE_PATH):
         bronze_table.alias("tgt")
         .merge(
             bronze_df.alias("src"),
-            "tgt.bronze_row_hash = src.bronze_row_hash"
+            "tgt.business_key = src.business_key AND tgt.record_hash = src.record_hash"
         )
         .whenNotMatchedInsertAll()
         .execute()
@@ -81,7 +97,7 @@ else:
         .format("delta")
         .mode("overwrite")
         .option("overwriteSchema", "true")
-        .partitionBy("semester", "grade")
+        .partitionBy("semester", "bronze_loaded_date")
         .save(BRONZE_PATH)
     )
     print(f"✅ Bronze table created at {BRONZE_PATH}")
@@ -105,10 +121,10 @@ bronze_verify = spark.read.format("delta").load(BRONZE_PATH)
 total = bronze_verify.count()
 print(f"\n── Bronze Table Stats ──────────────────────")
 print(f"  Total rows   : {total}")
-print(f"  Partitions   : semester, grade")
+print(f"  Partitions   : semester, bronze_loaded_date")
 print(f"  Path         : {BRONZE_PATH}")
 
-bronze_verify.groupBy("semester","grade").count().orderBy("semester","grade").show()
+bronze_verify.groupBy("semester").count().orderBy("semester").show()
 
 # Delta history
 print("\n── Delta History (last 5) ──")

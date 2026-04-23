@@ -23,18 +23,24 @@ spark = SparkSession.builder.getOrCreate()
 
 # COMMAND ----------
 # ── These can be overridden by Databricks Job Parameters ──────────────────────
-dbutils.widgets.text("source_path",  "dbfs:/FileStore/student_score_dataset.csv", "Source CSV Path")
-dbutils.widgets.text("semester",     "2024-1",                                    "Semester")
-dbutils.widgets.text("run_mode",     "full",                                      "Run Mode: full | bronze_only | gold_only")
-dbutils.widgets.text("notify_email", "",                                           "Notification Email")
+dbutils.widgets.text("source_path",  "/Volumes/workspace/default/datasets/student_score_dataset.csv", "Source CSV Path")
+dbutils.widgets.text("semester",     "2024-1",                                                          "Semester")
+dbutils.widgets.text("run_mode",     "full",                                                            "Run Mode: full | ingest_only | bronze_only | silver_only | gold_only")
+dbutils.widgets.text("notify_email", "",                                                                 "Notification Email")
 
 SOURCE_PATH   = dbutils.widgets.get("source_path")
 SEMESTER      = dbutils.widgets.get("semester")
 RUN_MODE      = dbutils.widgets.get("run_mode")
 NOTIFY_EMAIL  = dbutils.widgets.get("notify_email")
 
-NOTEBOOKS_DIR = "/Repos/<your-username>/soa-student-analytics/databricks/notebooks"
-# ↑ Change <your-username> to your Databricks username after linking the repo
+try:
+    # When imported as a Databricks Repo, resolve the notebooks directory automatically
+    _ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    _nb_path = _ctx.notebookPath().get()                  # e.g. /Repos/user/soa-student-analytics/databricks/notebooks/05_pipeline_runner
+    NOTEBOOKS_DIR = "/".join(_nb_path.split("/")[:-1])    # strip the filename
+except Exception:
+    NOTEBOOKS_DIR = "/Repos/<your-username>/soa-student-analytics/databricks/notebooks"
+# ↑ Fallback: change <your-username> to your Databricks username when running manually
 
 print(f"╔══════════════════════════════════════════════════╗")
 print(f"║   SOA Student Analytics  —  Pipeline Runner      ║")
