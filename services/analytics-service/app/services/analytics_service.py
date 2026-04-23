@@ -47,10 +47,13 @@ class AnalyticsService:
         for s in scores:
             by_student[s["student_id"]].append(s)
 
+        def _avg_gpa(ss: list) -> float:
+            gpas = [s["gpa"] for s in ss if s.get("gpa") is not None]
+            return sum(gpas) / len(gpas) if gpas else 0.0
+
         at_risk = sum(
             1 for sid, ss in by_student.items()
-            if (sum(s["gpa"] for s in ss if s.get("gpa") is not None) / len(ss)) < 5.0
-               or sum(1 for s in ss if s.get("grade") == "F") >= 2
+            if _avg_gpa(ss) < 5.0 or sum(1 for s in ss if s.get("grade") == "F") >= 2
         )
 
         # top major

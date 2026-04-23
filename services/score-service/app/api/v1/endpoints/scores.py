@@ -35,9 +35,9 @@ async def list_scores(
         items = load_scores()
         return {"total": len(items), "items": items[:page_size]}
 
-    from sqlalchemy import select
+    from sqlalchemy import select, false
     from app.models.score import Score
-    q = select(Score).where(Score.is_deleted == False)
+    q = select(Score).where(Score.is_deleted.is_(False))
     if semester:
         q = q.where(Score.semester == semester)
     rows = (await db.execute(q)).scalars().all()
@@ -67,15 +67,23 @@ async def scores_by_student(
     return await score_service.list_by_student(db, student_id, semester)
 
 
-@router.get("/scores/subject/{subject}", tags=["Scores"])
+@router.get(
+    "/scores/subject/{subject}",
+    tags=["Scores"],
+    description=(
+        "Return scores for a specific subject. "
+        "In CSV mode the dataset has no subject dimension, "
+        "so this always returns an empty list with an explanatory note. "
+        "Use GET /scores to retrieve all students."
+    ),
+)
 async def scores_by_subject(
     subject: str,
     semester: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     if settings.DATA_MODE == "csv":
-        # Dataset has no subject dimension; return empty with explanation.
-        return {"total": 0, "items": [], "note": "Dataset has no subject dimension; use list-all endpoint."}
+        return {"total": 0, "items": [], "note": "Dataset has no subject dimension; use GET /scores for all students."}
     return await score_service.list_by_subject(db, subject, semester)
 
 
