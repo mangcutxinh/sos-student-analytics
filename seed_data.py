@@ -20,6 +20,17 @@ OK   = "\033[92m✓\033[0m"
 FAIL = "\033[91m✗\033[0m"
 INFO = "\033[94m→\033[0m"
 
+def to_float(x):
+    try:
+        return float(x)
+    except:
+        return 0.0
+
+def to_int(x):
+    try:
+        return int(x)
+    except:
+        return 0
 
 def check_services():
     print(f"\n{INFO} Checking services...")
@@ -59,7 +70,7 @@ def seed_students(rows: list[dict], client: httpx.Client):
             "gender":       row["gender"].strip() if row["gender"] else None,
             "previous_gpa": float(row["previous_gpa"]) if row["previous_gpa"] else None,
             "email":        f"student{sid}@soa.edu.vn",
-            "password":     f"pass{sid}",
+            "password":     f"12345678",  # Mật khẩu mặc định cho tất cả sinh viên
             "role":         "student",
         }
         try:
@@ -71,7 +82,8 @@ def seed_students(rows: list[dict], client: httpx.Client):
             else:
                 failed += 1
                 if failed <= 3:
-                    print(f"    {FAIL} Student {sid}: {r.status_code} {r.text[:80]}")
+                    print(f"    {FAIL} Score {sid}: {r.status_code}")
+                    print(r.text)
         except Exception as e:
             failed += 1
 
@@ -86,19 +98,16 @@ def seed_scores(rows: list[dict], client: httpx.Client):
     for row in rows:
         sid = int(row["student_id"])
         payload = {
-            "student_id":         sid,
-            "name":               row["name"].strip(),
-            "age":                int(row["age"]) if row["age"] else None,
-            "gender":             row["gender"].strip() if row["gender"] else None,
-            "quiz1_marks":        float(row["quiz1_marks"]),
-            "quiz2_marks":        float(row["quiz2_marks"]),
-            "quiz3_marks":        float(row["quiz3_marks"]),
-            "midterm_marks":      float(row["midterm_marks"]),
-            "final_marks":        float(row["final_marks"]),
-            "previous_gpa":       float(row["previous_gpa"]) if row["previous_gpa"] else None,
-            "lectures_attended":  int(row["lectures_attended"]) if row["lectures_attended"] else 0,
-            "labs_attended":      int(row["labs_attended"]) if row["labs_attended"] else 0,
-        }
+    "student_id": sid,
+    "quiz1_marks": to_float(row["quiz1_marks"]),
+    "quiz2_marks": to_float(row["quiz2_marks"]),
+    "quiz3_marks": to_float(row["quiz3_marks"]),
+    "midterm_marks": to_float(row["midterm_marks"]),
+    "final_marks": to_float(row["final_marks"]),
+    "previous_gpa": to_float(row["previous_gpa"]),
+    "lectures_attended": to_int(row["lectures_attended"]),
+    "labs_attended": to_int(row["labs_attended"]),
+}
         try:
             r = client.post(f"{SCORE_URL}/scores", json=payload, timeout=5)
             if r.status_code == 201:
@@ -118,7 +127,8 @@ def seed_scores(rows: list[dict], client: httpx.Client):
             else:
                 failed += 1
                 if failed <= 3:
-                    print(f"    {FAIL} Score {sid}: {r.status_code} {r.text[:80]}")
+                    print(f"    {FAIL} Score {sid}: {r.status_code}")
+                    print(r.text)
         except Exception as e:
             failed += 1
 
